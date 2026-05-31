@@ -12,6 +12,8 @@ Usage:
   python throttle_probe.py --record session.slcan
 """
 
+from __future__ import annotations
+
 import argparse
 import sys
 import time
@@ -157,14 +159,14 @@ def main() -> None:
     global fps, _fps_count, _t_fps
 
     parser = argparse.ArgumentParser(description="Live RPM + throttle candidate dashboard")
-    parser.add_argument("--port",   default="/dev/ttyUSB0", help="Serial port")
+    parser.add_argument("--port",   default="/dev/cu.usbserial-0001", help="Serial port")
     parser.add_argument("--baud",   type=int, default=115200, help="Serial baud rate")
     parser.add_argument("--record", metavar="FILE",
                         help="Append raw SLCAN frames to FILE for offline analysis")
     args = parser.parse_args()
 
     try:
-        ser = serial.Serial(args.port, args.baud, timeout=0)
+        ser = serial.Serial(args.port, args.baud, timeout=0.05)
     except serial.SerialException as e:
         sys.exit(f"Cannot open {args.port}: {e}\n"
                  f"  Make sure mpremote / Thonny is disconnected and the sniffer is running as main.py")
@@ -179,7 +181,13 @@ def main() -> None:
 
     try:
         while True:
-            chunk = ser.read(4096)
+            try:
+                chunk = ser.read(4096)
+            except serial.SerialException as e:
+                sys.stdout.write(_CLEAR)
+                sys.exit(f"Lost the serial port: {e}\n"
+                         f"  Another program (mpremote / Thonny / a second probe) is likely "
+                         f"holding {args.port}. Disconnect it and rerun.")
 
             if chunk:
                 if record_fh:
