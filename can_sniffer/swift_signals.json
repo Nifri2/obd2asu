@@ -1,0 +1,44 @@
+{
+  "_note": "Fill in can_id values after discovering signals with find_signal.py or SavvyCAN. Run decode.py once filled in.",
+  "_hint_rpm":      "Look for a 16-bit big-endian word that reads ~750 at idle and rises to ~6000. Often 0.25 rpm/bit.",
+  "_hint_throttle": "Slow pedal sweep (scenario 7) isolates this cleanly. Usually a 1-byte 0–255 signal, scale ~0.392 for 0–100%.",
+  "_hint_speed":    "Steady cruise at known speed, compare to speedometer. Often 2 bytes, ~0.01 km/h per bit.",
+  "_hint_openDBC":  "Check github.com/commaai/opendbc for suzuki/ — K14C signals may already be named.",
+
+  "rpm": {
+    "can_id":  "0x000",
+    "byte":    0,
+    "length":  2,
+    "endian":  "big",
+    "scale":   0.25,
+    "offset":  0,
+    "unit":    "rpm"
+  },
+  "throttle": {
+    "can_id":  "0x000",
+    "byte":    0,
+    "length":  1,
+    "endian":  "big",
+    "scale":   0.392,
+    "offset":  0,
+    "unit":    "%"
+  },
+  "speed": {
+    "can_id":  "0x000",
+    "byte":    0,
+    "length":  2,
+    "endian":  "big",
+    "scale":   0.01,
+    "offset":  0,
+    "unit":    "km/h"
+  },
+  "load": {
+    "can_id":  "0x000",
+    "byte":    0,
+    "length":  1,
+    "endian":  "big",
+    "scale":   0.392,
+    "offset":  0,
+    "unit":    "%"
+  }
+}
