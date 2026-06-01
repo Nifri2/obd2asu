@@ -29,6 +29,14 @@ tasks:
       - mpremote connect {{.PORT}} exec "import os; os.mkdir('/shared')" || true
       - mpremote connect {{.PORT}} cp can_sniffer/shared/events_config.json  :/shared/events_config.json
 
+  # ── Upload source files (Mac port) ────────────────────────────────────────────
+  upload-mac:
+    desc: "Upload firmware source files (Mac: /dev/cu.usbserial-0001)"
+    cmds:
+      - task: upload
+        vars:
+          PORT: '/dev/cu.usbserial-0001'
+
   # ── Upload pop audio bank ─────────────────────────────────────────────────────
   upload-pops:
     desc: Upload pop audio bank (manifest + PCM files) to /pops on device
@@ -56,3 +64,12 @@ tasks:
     interactive: true
     cmds:
       - mpremote connect {{.PORT}} repl
+
+  # ── Mac throttle probe ────────────────────────────────────────────────────────
+  probe:
+    desc: "Live RPM + throttle dashboard (Mac: /dev/cu.usbserial-0001)"
+    interactive: true
+    vars:
+      MAC_PORT: '{{.PORT | default "/dev/cu.usbserial-0001"}}'
+    cmds:
+      - can_sniffer/pc/.venv/bin/python can_sniffer/pc/throttle_probe.py --port {{.MAC_PORT}}

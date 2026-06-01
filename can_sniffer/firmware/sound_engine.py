@@ -32,7 +32,7 @@ except ImportError:
 
 try:
     @micropython.viper
-    def _cvt(src: ptr8, dst: ptr8, n_bytes: int, vol_fp: int) -> None:
+    def _cvt(src: ptr8, dst: ptr8, n_bytes: int, vol_fp: int):
         """Convert n_bytes of int16 mono to stereo, apply 8-bit fixed-point vol."""
         i: int = 0
         j: int = 0
