@@ -1,0 +1,58 @@
+version: "3"
+
+vars:
+  PORT: '{{.PORT | default "/dev/ttyUSB0"}}'
+  FIRMWARE: ESP32_GENERIC-20260406-v1.28.0.bin
+
+tasks:
+  default:
+    silent: true
+    cmds:
+      - task --list
+
+  # ── Flash MicroPython firmware ────────────────────────────────────────────────
+  flash-firmware:
+    desc: Erase ESP32 flash and write MicroPython firmware
+    cmds:
+      - esptool.py --chip esp32 --port {{.PORT}} erase_flash
+      - esptool.py --chip esp32 --port {{.PORT}} --baud 460800 write_flash -z 0x1000 {{.FIRMWARE}}
+
+  # ── Upload Python source files ────────────────────────────────────────────────
+  upload:
+    desc: Upload firmware source files to the device (skips pops/)
+    cmds:
+      - mpremote connect {{.PORT}} cp can_sniffer/firmware/mcp_driver.py    :/mcp_driver.py
+      - mpremote connect {{.PORT}} cp can_sniffer/firmware/config.py         :/config.py
+      - mpremote connect {{.PORT}} cp can_sniffer/firmware/sound_engine.py   :/sound_engine.py
+      - mpremote connect {{.PORT}} cp can_sniffer/shared/detector.py         :/detector.py
+      - mpremote connect {{.PORT}} cp can_sniffer/firmware/main_soundsystem.py :/main.py
+      - mpremote connect {{.PORT}} exec "import os; os.mkdir('/shared')" || true
+      - mpremote connect {{.PORT}} cp can_sniffer/shared/events_config.json  :/shared/events_config.json
+
+  # ── Upload pop audio bank ─────────────────────────────────────────────────────
+  upload-pops:
+    desc: Upload pop audio bank (manifest + PCM files) to /pops on device
+    cmds:
+      - mpremote connect {{.PORT}} exec "import os; os.mkdir('/pops')" || true
+      - mpremote connect {{.PORT}} cp -r can_sniffer/pops/ :/pops/
+
+  # ── Full flash ────────────────────────────────────────────────────────────────
+  full-flash:
+    desc: Flash firmware then upload all source files and audio bank
+    cmds:
+      - task: flash-firmware
+      - task: upload
+      - task: upload-pops
+
+  # ── Helpers ───────────────────────────────────────────────────────────────────
+  repl:
+    desc: Open a MicroPython REPL on the device
+    interactive: true
+    cmds:
+      - mpremote connect {{.PORT}} repl
+
+  logs:
+    desc: Stream serial output from the device (Ctrl-C to stop)
+    interactive: true
+    cmds:
+      - mpremote connect {{.PORT}} repl

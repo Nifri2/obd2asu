@@ -36,3 +36,17 @@ DEFAULT_MODE = 'B'
 
 # Marker button: GPIO0 is the BOOT button on most DevKitC boards
 MARKER_BTN_PIN = 0
+
+# ── I2S (PCM5102A DAC) ────────────────────────────────────────────────────────
+# PCM5102A: BCK → GPIO26, LRCK → GPIO25, DIN → GPIO22
+# XMT pin on PCM5102A: pull to 3.3V (always unmuted), or drive with GPIO.
+# SCK pin on PCM5102A: leave floating or pull low (use internal PLL from BCK).
+I2S_BCK_PIN  = 26   # Bit clock
+I2S_WS_PIN   = 25   # Word select / LRCK
+I2S_SD_PIN   = 22   # Serial data out (DIN on PCM5102A)
+I2S_RATE     = 22050
+I2S_IBUF     = 8192  # DMA buffer bytes (~93 ms at 22050 Hz stereo 16-bit)
+
+# Pop bank on device filesystem
+POPS_DIR     = "/pops"
+POPS_MANIFEST = "/pops/manifest.json"

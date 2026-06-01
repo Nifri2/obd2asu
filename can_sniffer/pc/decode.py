@@ -1,270 +1,288 @@
 """
-CAN log decoder — converts a captured log + swift_signals.json → CSV timelines.
+CAN log → CSV timeline decoder for ZC33S confirmed signals.
 
-Output CSVs go directly into sound_sim/timelines/ and are ready for driving_mode.py.
+Confirmed signals (hardcoded — no swift_signals.json needed):
+  RPM      0x124  bytes[1:3] BE / 4      (valid when byte0 == 0x08)
+  Throttle 0x122  byte4 * 100/255 %      (idle ≈10 %, released <15 %)
+  Brake    0x1AF  byte6 & 0x40           (1 when pedal pressed)
+  Speed    0x1B8  four 16-bit BE wheels at bytes[0:2,2:4,4:6,6:8] / 32, averaged
 
-Usage:
-  python decode.py logs/2_cruise.log --signals ../swift_signals.json
-  python decode.py logs/2_cruise.log --signals ../swift_signals.json --out ../../sound_sim/timelines/
-  python decode.py logs/2_cruise.log --signals ../swift_signals.json --emit-dbc swift.dbc
+Output CSV: t_ms, rpm, throttle_pct, speed_kmh, brake
+
+Synthetic timestamp: counts 0x124 RPM frames at their nominal 50 Hz rate.
+Adjust --hz-rpm if your bus uses a different rate.
 
 Log formats auto-detected:
-  Mode A: <millis> <hex_id> <dlc> <bytes>
-  Mode B: SLCAN t/T frames
-  Mode C: candump  (<ts>) can0 <ID>#<DATA>
+  Mode A  <millis> <hex_id> <dlc> <bytes>
+  Mode B  SLCAN  t<III><L><DATA>   (one frame per line, \r optional)
+  Mode C  candump  (<ts>) can0 <ID>#<DATA>
+
+Usage:
+  python decode.py logs/04_accel_to_second_gear_then_liftoff.log
+  python decode.py logs/*.log --out ../../sound_sim/timelines/ --hz-rpm 50
 """
 
 import argparse
 import csv
-import json
-import struct
 import sys
 from pathlib import Path
 
 
-# ── Signal extraction ─────────────────────────────────────────────────────────
+# ── Signal parsers ────────────────────────────────────────────────────────────
 
-def extract_value(data: bytes, byte_offset: int, length: int, endian: str, scale: float, offset: float) -> float | None:
-    end = byte_offset + length
-    if end > len(data):
-        return None
-    chunk = data[byte_offset:end]
-    fmt_map = {(1, "big"): ">B", (1, "little"): "<B",
-               (2, "big"): ">H", (2, "little"): "<H",
-               (4, "big"): ">I", (4, "little"): "<I"}
-    fmt = fmt_map.get((length, endian))
-    if fmt is None:
-        return None
-    raw = struct.unpack(fmt, chunk)[0]
-    return raw * scale + offset
+RPM_ID      = 0x124
+THROTTLE_ID = 0x122
+BRAKE_ID    = 0x1AF
+SPEED_ID    = 0x1B8
+
+SIGNAL_IDS = {RPM_ID, THROTTLE_ID, BRAKE_ID, SPEED_ID}
 
 
-# ── Log parsing (shared with find_signal.py) ──────────────────────────────────
+def _parse_signals(can_id: int, data: bytes, state: dict) -> bool:
+    """Update state dict from one CAN frame. Returns True if any signal updated."""
+    if can_id == RPM_ID:
+        if len(data) >= 3 and data[0] == 0x08:
+            state["rpm"] = int.from_bytes(data[1:3], "big") / 4.0
+            state["_rpm_count"] += 1
+            return True
+    elif can_id == THROTTLE_ID:
+        if len(data) >= 5:
+            state["throttle_pct"] = data[4] * 100.0 / 255.0
+            return True
+    elif can_id == BRAKE_ID:
+        if len(data) >= 7:
+            state["brake"] = 1 if (data[6] & 0x40) else 0
+            return True
+    elif can_id == SPEED_ID:
+        if len(data) >= 8:
+            wheels = [int.from_bytes(data[i*2:(i+1)*2], "big") / 32.0 for i in range(4)]
+            state["speed_kmh"] = sum(wheels) / 4.0
+            return True
+    return False
 
-def detect_format(first_line: str) -> str:
-    if first_line.startswith("t") or first_line.startswith("T"):
+
+# ── Log parsers ───────────────────────────────────────────────────────────────
+
+def _detect_format(line: str) -> str:
+    if line.startswith("t") or line.startswith("T"):
         return "B"
-    if first_line.startswith("("):
+    if line.startswith("("):
         return "C"
     return "A"
 
 
-def parse_log(path: Path) -> list[dict]:
-    frames = []
-    fmt = None
-    first_ts = None
+def _parse_slcan_frame(line: str) -> tuple[int, bytes] | None:
+    """Parse one SLCAN line → (can_id, data) or None."""
+    try:
+        if line[0] == "t":
+            can_id = int(line[1:4], 16)
+            dlc    = int(line[4])
+            data   = bytes(int(line[5 + i*2 : 7 + i*2], 16) for i in range(dlc))
+        elif line[0] == "T":
+            can_id = int(line[1:9], 16)
+            dlc    = int(line[9])
+            data   = bytes(int(line[10 + i*2 : 12 + i*2], 16) for i in range(dlc))
+        else:
+            return None
+        return can_id, data
+    except (ValueError, IndexError):
+        return None
 
-    with open(path) as f:
-        for raw_line in f:
-            line = raw_line.strip()
+
+def _iter_frames(path: Path):
+    """
+    Yield (can_id, data, is_rpm_frame: bool, ts_s: float | None) per frame.
+    ts_s is set only for Mode C logs; None means synthetic clock will be used.
+    """
+    fmt = None
+    with open(path, errors="replace") as f:
+        for raw in f:
+            line = raw.strip().lstrip("\r\n")
             if not line or line.startswith("#"):
                 continue
+
             if fmt is None:
-                fmt = detect_format(line)
+                fmt = _detect_format(line)
+
             try:
-                if fmt == "A":
+                if fmt == "B":
+                    result = _parse_slcan_frame(line.rstrip("\r"))
+                    if result:
+                        yield result[0], result[1], result[0] == RPM_ID, None
+
+                elif fmt == "A":
                     parts = line.split()
-                    ts_ms = float(parts[0])
+                    if len(parts) < 3:
+                        continue
+                    ts_s   = float(parts[0]) / 1000.0
                     can_id = int(parts[1], 16)
-                    dlc = int(parts[2])
-                    data = bytes(int(x, 16) for x in parts[3:3 + dlc])
-                elif fmt == "B":
-                    if line[0] == "t":
-                        can_id = int(line[1:4], 16)
-                        dlc = int(line[4])
-                        data = bytes(int(line[5 + i*2:7 + i*2], 16) for i in range(dlc))
-                    else:
-                        can_id = int(line[1:9], 16)
-                        dlc = int(line[9])
-                        data = bytes(int(line[10 + i*2:12 + i*2], 16) for i in range(dlc))
-                    ts_ms = len(frames) * 1.0
+                    dlc    = int(parts[2])
+                    data   = bytes(int(parts[3 + i], 16) for i in range(dlc))
+                    yield can_id, data, can_id == RPM_ID, ts_s
+
                 elif fmt == "C":
                     ts_str = line[1:line.index(")")]
-                    ts_s = float(ts_str)
-                    rest = line[line.index(")") + 1:].strip()
-                    parts = rest.split()
-                    id_data = parts[1] if len(parts) > 1 else parts[0]
-                    can_id_str, data_str = id_data.split("#", 1)
-                    can_id = int(can_id_str, 16)
-                    data = bytes.fromhex(data_str)
-                    ts_ms = ts_s * 1000.0
-                else:
-                    continue
+                    ts_s   = float(ts_str)
+                    rest   = line[line.index(")") + 1:].strip()
+                    parts  = rest.split()
+                    id_str, data_str = (parts[1] if len(parts) > 1 else parts[0]).split("#")
+                    can_id = int(id_str, 16)
+                    data   = bytes.fromhex(data_str)
+                    yield can_id, data, can_id == RPM_ID, ts_s
 
-                if first_ts is None and fmt != "B":
-                    first_ts = ts_ms
-                if first_ts is not None and fmt != "B":
-                    ts_ms -= first_ts
-
-                frames.append({"ts_ms": ts_ms, "can_id": can_id, "data": data})
             except (ValueError, IndexError):
                 continue
 
-    return frames
 
+# ── Main decode logic ─────────────────────────────────────────────────────────
 
-# ── Signals config ────────────────────────────────────────────────────────────
-
-def load_signals(path: Path) -> dict:
-    with open(path) as f:
-        raw = json.load(f)
-    # Drop metadata keys starting with _
-    return {k: v for k, v in raw.items() if not k.startswith("_")}
-
-
-def check_signals(signals: dict) -> list[str]:
-    warnings = []
-    for name, sig in signals.items():
-        if sig.get("can_id", "0x000") in ("0x000", "0x0000", "0x00000000"):
-            warnings.append(f"  {name}: can_id is still placeholder 0x000 — skipped")
-    return warnings
-
-
-# ── Decode ────────────────────────────────────────────────────────────────────
-
-def decode(frames: list[dict], signals: dict) -> list[dict]:
+def decode_log(path: Path, hz_rpm: float = 50.0) -> list[dict]:
     """
-    Build a timeline dict per CAN ID with latest known values for each signal.
-    Output: list of {ts_ms, <signal_name>: value, ...} rows, one per unique timestamp.
+    Parse a log file → list of dicts with t_ms, rpm, throttle_pct, speed_kmh, brake.
+    Missing signals carry forward from the last known value.
+    Timestamps are either real (Mode A/C) or synthesised from RPM frame count.
     """
-    # Group signals by CAN ID
-    by_id: dict[int, list[tuple[str, dict]]] = {}
-    for name, sig in signals.items():
-        cid_raw = sig.get("can_id", "0x000")
-        try:
-            cid = int(cid_raw, 16)
-        except ValueError:
-            continue
-        if cid == 0:
-            continue
-        by_id.setdefault(cid, []).append((name, sig))
+    state: dict = {
+        "rpm":          0.0,
+        "throttle_pct": 0.0,
+        "speed_kmh":    0.0,
+        "brake":        0,
+        "_rpm_count":   0,
+    }
 
-    # Current known values
-    latest: dict[str, float | None] = {n: None for n in signals}
-    rows = []
+    raw_rows: list[dict] = []
+    real_ts: list[float | None] = []
+    rpm_frame_indices: list[int] = []   # positions of RPM frames in raw_rows
 
-    for f in frames:
-        cid = f["can_id"]
-        if cid not in by_id:
-            continue
-        updated = False
-        for name, sig in by_id[cid]:
-            val = extract_value(
-                f["data"],
-                sig.get("byte", 0),
-                sig.get("length", 1),
-                sig.get("endian", "big"),
-                sig.get("scale", 1.0),
-                sig.get("offset", 0.0),
-            )
-            if val is not None:
-                latest[name] = round(val, 3)
-                updated = True
+    for frame_idx, (can_id, data, is_rpm, ts_s) in enumerate(_iter_frames(path)):
+        updated = _parse_signals(can_id, data, state)
         if updated:
-            row = {"ts_ms": round(f["ts_ms"], 1)}
-            row.update(latest)
-            rows.append(row)
+            raw_rows.append({
+                "rpm":          state["rpm"],
+                "throttle_pct": state["throttle_pct"],
+                "speed_kmh":    state["speed_kmh"],
+                "brake":        state["brake"],
+                "_frame_idx":   frame_idx,
+            })
+            real_ts.append(ts_s)
+            if is_rpm:
+                rpm_frame_indices.append(len(raw_rows) - 1)
 
+    if not raw_rows:
+        return []
+
+    # ── Assign timestamps ─────────────────────────────────────────────────────
+    has_real_ts = any(ts is not None for ts in real_ts)
+
+    if has_real_ts:
+        # Mode A or C: real timestamps available; fill gaps by carry-forward.
+        t_base = next(ts for ts in real_ts if ts is not None)
+        t_ms_list: list[float] = []
+        for ts in real_ts:
+            if ts is not None:
+                t_ms_list.append((ts - t_base) * 1000.0)
+            else:
+                t_ms_list.append(t_ms_list[-1] + 2.0 if t_ms_list else 0.0)
+    else:
+        # Mode B (no real timestamps): synthesise using RPM frame count.
+        # Each RPM frame nominally arrives at hz_rpm → 1000/hz_rpm ms apart.
+        # Build (row_index, t_ms) anchors, then linearly interpolate everything.
+        n_rpm  = len(rpm_frame_indices)
+        n_rows = len(raw_rows)
+        dt_rpm = 1000.0 / hz_rpm   # e.g. 20 ms at 50 Hz
+
+        if n_rpm < 2:
+            t_ms_list = [i * 2.0 for i in range(n_rows)]
+        else:
+            anchors = [(row_idx, k * dt_rpm) for k, row_idx in enumerate(rpm_frame_indices)]
+            t_ms_list = [0.0] * n_rows
+
+            # Assign anchor points
+            for row_idx, t in anchors:
+                t_ms_list[row_idx] = t
+
+            # Interpolate between consecutive anchors
+            for k in range(len(anchors) - 1):
+                i0, t0 = anchors[k]
+                i1, t1 = anchors[k + 1]
+                span = i1 - i0
+                step = (t1 - t0) / span if span > 0 else dt_rpm / 5
+                for j in range(i0 + 1, i1):
+                    t_ms_list[j] = t0 + (j - i0) * step
+
+            # Before first anchor: extrapolate backwards using first interval
+            i0, t0 = anchors[0]
+            if i0 > 0:
+                i1, t1 = anchors[1]
+                step = (t1 - t0) / max(1, i1 - i0)
+                for j in range(i0):
+                    t_ms_list[j] = t0 - (i0 - j) * step
+
+            # After last anchor: extrapolate forwards
+            i_last, t_last = anchors[-1]
+            i_prev, t_prev = anchors[-2]
+            step = (t_last - t_prev) / max(1, i_last - i_prev)
+            for j in range(i_last + 1, n_rows):
+                t_ms_list[j] = t_last + (j - i_last) * step
+
+        # Ensure non-decreasing and shift so min=0
+        t_min = min(t_ms_list)
+        if t_min < 0.0:
+            t_ms_list = [t - t_min for t in t_ms_list]
+
+    rows = []
+    for i, row in enumerate(raw_rows):
+        rows.append({
+            "t_ms":         round(t_ms_list[i], 1),
+            "rpm":          round(row["rpm"],          1),
+            "throttle_pct": round(row["throttle_pct"], 2),
+            "speed_kmh":    round(row["speed_kmh"],    2),
+            "brake":        row["brake"],
+        })
     return rows
 
 
-def write_csv(rows: list[dict], signals: dict, out_path: Path) -> None:
-    # Preferred column order: ts_ms, then required signals, then the rest
-    priority = ["ts_ms", "rpm", "throttle", "speed", "load"]
-    extras = [k for k in signals if k not in priority]
-    columns = priority + extras
-
+def write_csv(rows: list[dict], out_path: Path) -> None:
+    cols = ["t_ms", "rpm", "throttle_pct", "speed_kmh", "brake"]
     with open(out_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=columns, extrasaction="ignore")
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({k: row.get(k, "") for k in columns})
+        w = csv.DictWriter(f, fieldnames=cols)
+        w.writeheader()
+        w.writerows(rows)
 
 
-# ── DBC emitter ───────────────────────────────────────────────────────────────
+# ── CLI ───────────────────────────────────────────────────────────────────────
 
-def emit_dbc(signals: dict, out_path: Path) -> None:
-    lines = ['VERSION ""', "", "NS_ :", "", "BS_:", "", "BU_:", ""]
-    groups: dict[int, list] = {}
-    for name, sig in signals.items():
-        try:
-            cid = int(sig.get("can_id", "0x000"), 16)
-        except ValueError:
-            continue
-        if cid == 0:
-            continue
-        groups.setdefault(cid, []).append((name, sig))
-
-    for cid, sigs in sorted(groups.items()):
-        dlc = 8
-        lines.append(f"BO_ {cid} {cid:03X}: {dlc} Vector__XXX")
-        for name, sig in sigs:
-            byte_off = sig.get("byte", 0)
-            length   = sig.get("length", 1)
-            endian   = sig.get("endian", "big")
-            scale    = sig.get("scale", 1.0)
-            offset_v = sig.get("offset", 0.0)
-            unit     = sig.get("unit", "")
-            start_bit = byte_off * 8
-            val_type  = "1" if endian == "big" else "0"
-            lines.append(
-                f" SG_ {name} : {start_bit}|{length*8}@{val_type}+ "
-                f"({scale},{offset_v}) [0|0] \"{unit}\" Vector__XXX"
-            )
-        lines.append("")
-
-    out_path.write_text("\n".join(lines))
-
-
-# ── Main ─────────────────────────────────────────────────────────────────────
-
-def main():
-    parser = argparse.ArgumentParser(description="Decode CAN log to CSV timeline")
-    parser.add_argument("log",       help="Log file (Mode A, B, or C)")
-    parser.add_argument("--signals", default="../swift_signals.json", help="Signal table JSON")
-    parser.add_argument("--out",     default="../../sound_sim/timelines/", help="Output directory")
-    parser.add_argument("--emit-dbc", metavar="FILE", help="Also write a DBC file")
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Decode CAN sniffer log → CSV timeline")
+    parser.add_argument("logs",    nargs="+", help="Log file(s) (Mode A, B, or C)")
+    parser.add_argument("--out",   default="../../sound_sim/timelines/",
+                        help="Output directory for CSV files (default: sound_sim/timelines/)")
+    parser.add_argument("--hz-rpm", type=float, default=50.0,
+                        help="Nominal RPM frame rate Hz for synthetic clock (default: 50)")
     args = parser.parse_args()
 
-    log_path  = Path(args.log)
-    sig_path  = Path(args.signals)
-    out_dir   = Path(args.out)
-
-    if not log_path.exists():
-        sys.exit(f"Log not found: {log_path}")
-    if not sig_path.exists():
-        sys.exit(f"Signals file not found: {sig_path}\n"
-                 f"Fill in can_sniffer/swift_signals.json first.")
-
-    signals = load_signals(sig_path)
-    warnings = check_signals(signals)
-    if warnings:
-        print("Warnings (signals with placeholder IDs — skipped):")
-        for w in warnings:
-            print(w)
-
-    active = {k: v for k, v in signals.items()
-              if int(v.get("can_id", "0x000"), 16) != 0}
-    if not active:
-        sys.exit("No usable signals (all can_id values are 0x000). Fill in swift_signals.json first.")
-
-    print(f"Parsing {log_path}...")
-    frames = parse_log(log_path)
-    print(f"  {len(frames)} frames")
-
-    print(f"Decoding with {len(active)} signals: {', '.join(active.keys())}")
-    rows = decode(frames, active)
-    print(f"  {len(rows)} output rows")
-
+    out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / (log_path.stem + ".csv")
-    write_csv(rows, active, out_path)
-    print(f"Written: {out_path}")
 
-    if args.emit_dbc:
-        dbc_path = Path(args.emit_dbc)
-        emit_dbc(signals, dbc_path)
-        print(f"DBC: {dbc_path}")
+    for log_arg in args.logs:
+        log_path = Path(log_arg)
+        if not log_path.exists():
+            print(f"Not found: {log_path}", file=sys.stderr)
+            continue
+
+        print(f"Decoding {log_path.name}...", end=" ", flush=True)
+        rows = decode_log(log_path, hz_rpm=args.hz_rpm)
+        if not rows:
+            print("no signal frames found — check format or IDs")
+            continue
+
+        out_path = out_dir / (log_path.stem + ".csv")
+        write_csv(rows, out_path)
+        t_span = rows[-1]["t_ms"] - rows[0]["t_ms"]
+        rpm_vals = [r["rpm"] for r in rows if r["rpm"] > 100]
+        print(f"{len(rows)} rows, {t_span/1000:.1f}s"
+              + (f", rpm {min(rpm_vals):.0f}–{max(rpm_vals):.0f}" if rpm_vals else "")
+              + f" → {out_path}")
 
 
 if __name__ == "__main__":

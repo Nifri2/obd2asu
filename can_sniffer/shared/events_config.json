@@ -1,0 +1,33 @@
+{
+  "_note": "Thresholds tuned for ZC33S. Edit here, then r=reload in driving_mode.py. Firmware reads on boot.",
+  "thresholds": {
+    "e1_rpm_min":      4500,
+    "e1_throttle_was":   60,
+    "e1_throttle_now":   15,
+    "e1_drpm_dt":      -300,
+    "e1_dthr_dt":      -200,
+
+    "e2_rpm_min":      2500,
+    "e2_rpm_max":      4500,
+    "e2_throttle_lo":    20,
+    "e2_throttle_hi":    60,
+    "e2_throttle_now":   15,
+    "e2_dthr_lo":       -30,
+    "e2_dthr_hi":      -250,
+    "e2_speed_min":      30,
+
+    "e3_throttle":       15,
+    "e3_rpm_min":      2000,
+    "e3_speed_min":      20,
+    "e3_sustain_ms":    300,
+
+    "e4_rpm_was_max":  3000,
+    "e4_speed_min":      10,
+    "e4_dthr_hi":        30,
+    "e4_drpm_dt":       -80
+  },
+  "cooldowns_ms": { "1": 1000, "2": 400, "3": 2000, "4": 600 },
+  "enabled":  { "1": true, "2": true, "3": true, "4": true },
+  "master_enable": true,
+  "master_volume": 1.0
+}

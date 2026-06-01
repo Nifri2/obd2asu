@@ -1,0 +1,62 @@
+{
+  "sample_rate": 22050,
+  "n_per_event": 8,
+  "events": {
+    "1": {
+      "name": "Anti-Lag Snap",
+      "files": [
+        "pop_event1_0.pcm",
+        "pop_event1_1.pcm",
+        "pop_event1_2.pcm",
+        "pop_event1_3.pcm",
+        "pop_event1_4.pcm",
+        "pop_event1_5.pcm",
+        "pop_event1_6.pcm",
+        "pop_event1_7.pcm"
+      ],
+      "length_samples": 7371
+    },
+    "2": {
+      "name": "Lift-Off Burble",
+      "files": [
+        "pop_event2_0.pcm",
+        "pop_event2_1.pcm",
+        "pop_event2_2.pcm",
+        "pop_event2_3.pcm",
+        "pop_event2_4.pcm",
+        "pop_event2_5.pcm",
+        "pop_event2_6.pcm",
+        "pop_event2_7.pcm"
+      ],
+      "length_samples": 9184
+    },
+    "3": {
+      "name": "Decel Burble",
+      "files": [
+        "pop_event3_0.pcm",
+        "pop_event3_1.pcm",
+        "pop_event3_2.pcm",
+        "pop_event3_3.pcm",
+        "pop_event3_4.pcm",
+        "pop_event3_5.pcm",
+        "pop_event3_6.pcm",
+        "pop_event3_7.pcm"
+      ],
+      "length_samples": 40145
+    },
+    "4": {
+      "name": "Soft Upshift",
+      "files": [
+        "pop_event4_0.pcm",
+        "pop_event4_1.pcm",
+        "pop_event4_2.pcm",
+        "pop_event4_3.pcm",
+        "pop_event4_4.pcm",
+        "pop_event4_5.pcm",
+        "pop_event4_6.pcm",
+        "pop_event4_7.pcm"
+      ],
+      "length_samples": 3232
+    }
+  }
+}
